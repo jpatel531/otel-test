@@ -41,6 +41,7 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(otelhttp.NewMiddleware(""))
+	r.Use(traceIDMiddleware())
 	r.Use(loggingMiddleware(logger))
 
 	r.Get("/", rootHandler())
@@ -56,10 +57,6 @@ func main() {
 func rootHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
-		spctx := trace.SpanContextFromContext(ctx)
-		if spctx.HasTraceID() {
-			w.Header().Set("X-Trace-ID", spctx.TraceID().String())
-		}
 
 		errMsg := req.URL.Query().Get("error")
 		if errMsg != "" {
@@ -183,6 +180,19 @@ func loggingMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
 
 			req = req.WithContext(logger.WithContext(ctx))
 			next.ServeHTTP(ww, req)
+		})
+	}
+}
+
+func traceIDMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			spctx := trace.SpanContextFromContext(req.Context())
+			if spctx.HasTraceID() {
+				w.Header().Set("X-Trace-ID", spctx.TraceID().String())
+			}
+
+			next.ServeHTTP(w, req)
 		})
 	}
 }
