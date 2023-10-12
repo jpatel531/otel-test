@@ -38,7 +38,17 @@ receivers:
     include_file_path: true
     poll_interval: 500ms
     include:
-      - /var/log/**/*example*/*.log
+      - /var/log/app.log
+    operators:
+      - id: parse_log
+        type: json_parser
+        parse_from: body
+      - id: trace
+        type: trace_parser
+        trace_id:
+          parse_from: attributes.trace_id
+        span_id:
+          parse_from: attributes.span_id
 
 processors:
   batch:

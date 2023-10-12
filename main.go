@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/go-chi/chi/middleware"
 	"github.com/go-chi/chi/v5"
 	"github.com/jpatel531/otel-test/config"
 	"github.com/rs/zerolog"
@@ -32,13 +34,16 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("loading config")
 	}
+	logger = enrichLogger(cfg, logger)
 
 	shutdown := initTelemetry(ctx, cfg)
 	defer shutdown(ctx)
 
 	r := chi.NewRouter()
+	r.Use(otelhttp.NewMiddleware(""))
+	r.Use(loggingMiddleware(logger))
 
-	r.Get("/", otelhttp.NewHandler(rootHandler(), "root").ServeHTTP)
+	r.Get("/", rootHandler())
 
 	server := &http.Server{Handler: r, Addr: cfg.Addr}
 
@@ -69,6 +74,10 @@ func rootHandler() http.HandlerFunc {
 }
 
 func initTelemetry(ctx context.Context, cfg config.Config) func(ctx context.Context) {
+	if cfg.OtelEndpoint == "" {
+		return func(ctx context.Context) {}
+	}
+
 	logger := zerolog.Ctx(ctx)
 
 	tp, err := initTracer(ctx, cfg)
@@ -135,4 +144,45 @@ func initMeter(ctx context.Context, endpoint string) (*sdkmetric.MeterProvider, 
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)))
 	otel.SetMeterProvider(mp)
 	return mp, nil
+}
+
+func enrichLogger(cfg config.Config, logger zerolog.Logger) zerolog.Logger {
+	hostname, _ := os.Hostname()
+	return logger.With().
+		Str("environment", cfg.Environment).
+		Str("service", cfg.ServiceName).
+		Str("hostname", hostname).
+		Logger()
+}
+
+func loggingMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			start := time.Now()
+			ctx := req.Context()
+
+			spctx := trace.SpanContextFromContext(ctx)
+			traceID := spctx.TraceID().String()
+			logger = logger.With().
+				Str("method", req.Method).
+				Str("remote_addr", req.RemoteAddr).
+				Str("url", req.URL.Path).
+				Str("user_agent", req.UserAgent()).
+				Str("trace_id", traceID).
+				Str("span_id", spctx.SpanID().String()).
+				Logger()
+
+			ww := middleware.NewWrapResponseWriter(w, req.ProtoMajor)
+			defer func() {
+				logger.Info().
+					Int("bytes", ww.BytesWritten()).
+					Dur("duration", time.Now().Sub(start)).
+					Int("status_code", ww.Status()).
+					Msgf("%s %s", req.Method, req.URL.String())
+			}()
+
+			req = req.WithContext(logger.WithContext(ctx))
+			next.ServeHTTP(ww, req)
+		})
+	}
 }
