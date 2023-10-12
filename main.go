@@ -3,8 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
+
+	"github.com/jpatel531/otel-test/db"
+
+	"github.com/jmoiron/sqlx"
 
 	"github.com/jpatel531/otel-test/middlewares"
 
@@ -30,12 +35,17 @@ func main() {
 	shutdown := telemetry.Init(ctx, cfg)
 	defer shutdown(ctx)
 
+	database, err := db.NewDB()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("connecting to db")
+	}
+
 	r := chi.NewRouter()
 	r.Use(otelhttp.NewMiddleware(""))
 	r.Use(middlewares.TraceID())
 	r.Use(middlewares.Logging(logger))
 
-	r.Get("/", rootHandler())
+	r.Get("/", rootHandler(database))
 
 	server := &http.Server{Handler: r, Addr: cfg.Addr}
 
@@ -45,19 +55,27 @@ func main() {
 	}
 }
 
-func rootHandler() http.HandlerFunc {
+func rootHandler(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
+		span := trace.SpanFromContext(ctx)
 
 		errMsg := req.URL.Query().Get("error")
 		if errMsg != "" {
-			span := trace.SpanFromContext(ctx)
 			span.SetStatus(codes.Error, "root failed")
 			span.RecordError(errors.New(errMsg))
 			return
 		}
 
-		_, _ = w.Write([]byte("ok"))
+		var i int
+		if err := db.GetContext(ctx, &i, "SELECT 1"); err != nil {
+			span.SetStatus(codes.Error, "root failed")
+			span.RecordError(errors.New(errMsg))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		_, _ = fmt.Fprintf(w, "%d", i)
 	}
 }
 
